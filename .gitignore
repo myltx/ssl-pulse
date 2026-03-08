@@ -1,0 +1,10 @@
+.venv/
+__pycache__/
+*.pyc
+*.log
+
+.ssl_pulse.env
+alert_state.json
+domains.json
+
+.DS_Store

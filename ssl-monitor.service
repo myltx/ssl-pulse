@@ -1,0 +1,16 @@
+[Unit]
+Description=SSL Monitoring Dashboard (Flask)
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/ssl-pulse
+ExecStart=/root/ssl-pulse/.venv/bin/python /root/ssl-pulse/check_ssl.py
+EnvironmentFile=-/root/ssl-pulse/.ssl_pulse.env
+Environment=PYTHONUNBUFFERED=1
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
