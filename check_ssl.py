@@ -756,6 +756,36 @@ def index():
     runtime_state = load_runtime_state()
     timer_panel = build_timer_panel(runtime_state)
     email_panel = build_email_panel(runtime_state)
+    current_view = (request.args.get("view") or "all").strip().lower()
+    filter_defs = [
+        ("all", "全部域名", lambda item: True),
+        ("attention", "优先处理", lambda item: item["status"] in {"即将过期", "已过期", "连接失败"}),
+        ("warning", "即将过期", lambda item: item["status"] == "即将过期"),
+        ("expired", "已过期", lambda item: item["status"] == "已过期"),
+        ("failed", "连接失败", lambda item: item["status"] == "连接失败"),
+        ("normal", "正常", lambda item: item["status"] == "正常"),
+    ]
+    filter_lookup = {key: (label, matcher) for key, label, matcher in filter_defs}
+    if current_view not in filter_lookup:
+        current_view = "all"
+
+    filter_tabs = []
+    for key, label, matcher in filter_defs:
+        count = sum(1 for item in results if matcher(item))
+        filter_tabs.append(
+            {
+                "key": key,
+                "label": label,
+                "count": count,
+                "active": key == current_view,
+                "href": url_for("index", view=key),
+            }
+        )
+
+    current_filter_label, current_filter_matcher = filter_lookup[current_view]
+    filtered_results = [item for item in results if current_filter_matcher(item)]
+    priority_results = [item for item in results if item["status"] in {"即将过期", "已过期", "连接失败"}]
+    spotlight_results = priority_results[:4]
 
     html_template = """
     <!DOCTYPE html>
@@ -766,290 +796,461 @@ def index():
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <style>
         :root {
-            --bg-0: #060b18;
-            --bg-1: #0d1530;
-            --bg-2: #1b2a52;
-            --text: #0f1c37;
-            --muted: #5f7094;
-            --line: rgba(95, 122, 170, 0.26);
-            --panel: rgba(245, 250, 255, 0.74);
-            --panel-strong: rgba(255, 255, 255, 0.88);
-            --brand: #2563eb;
-            --brand-soft: rgba(37, 99, 235, 0.12);
-            --ok: #138a36;
-            --warn: #b06f00;
-            --danger: #b42318;
-            --shadow: 0 18px 40px rgba(6, 11, 24, 0.24);
+            --bg-0: #091121;
+            --bg-1: #0e1a31;
+            --bg-2: #13284f;
+            --text: #d7e5ff;
+            --text-soft: #9bb0d8;
+            --panel: rgba(12, 22, 42, 0.68);
+            --panel-strong: rgba(248, 251, 255, 0.96);
+            --line: rgba(154, 184, 232, 0.16);
+            --line-strong: rgba(185, 208, 248, 0.34);
+            --brand: #5ea4ff;
+            --brand-deep: #2d6df6;
+            --ok: #22c55e;
+            --warn: #f59e0b;
+            --danger: #ef4444;
+            --shadow: 0 24px 48px rgba(4, 10, 24, 0.26);
         }
         * { box-sizing: border-box; }
+        html { color-scheme: light; }
         body {
             margin: 0;
             min-height: 100vh;
             font-family: "SF Pro Display", "Manrope", "PingFang SC", "Microsoft YaHei", sans-serif;
-            color: var(--text);
+            color: #132445;
             background:
-                radial-gradient(circle at 7% 8%, rgba(92, 180, 255, 0.30), transparent 42%),
-                radial-gradient(circle at 90% 92%, rgba(77, 212, 166, 0.28), transparent 44%),
-                linear-gradient(145deg, var(--bg-0), var(--bg-1) 52%, var(--bg-2));
-            padding: 18px 12px;
+                radial-gradient(circle at 10% 10%, rgba(77, 167, 255, 0.18), transparent 32%),
+                radial-gradient(circle at 88% 14%, rgba(58, 209, 167, 0.14), transparent 28%),
+                linear-gradient(145deg, var(--bg-0), var(--bg-1) 46%, var(--bg-2));
+            padding: 18px 14px 96px;
         }
+        body::before {
+            content: "";
+            position: fixed;
+            inset: 0;
+            pointer-events: none;
+            background-image:
+                linear-gradient(rgba(255, 255, 255, 0.018) 1px, transparent 1px),
+                linear-gradient(90deg, rgba(255, 255, 255, 0.018) 1px, transparent 1px);
+            background-size: 28px 28px;
+            mask-image: linear-gradient(180deg, rgba(0, 0, 0, 0.78), transparent 92%);
+        }
+        a { color: inherit; }
         .container {
-            width: min(1240px, 100%);
+            width: min(1340px, 100%);
             margin: 0 auto;
+            display: grid;
+            gap: 16px;
         }
-        .header {
+        .topbar {
+            position: sticky;
+            top: 12px;
+            z-index: 20;
             display: flex;
             flex-wrap: wrap;
             justify-content: space-between;
-            align-items: center;
-            gap: 12px;
-            margin-bottom: 14px;
-            padding: 12px 14px;
-            border-radius: 16px;
-            border: 1px solid rgba(182, 209, 255, 0.24);
-            background: rgba(255, 255, 255, 0.10);
-            backdrop-filter: blur(12px);
-            color: #eff5ff;
+            gap: 14px;
+            padding: 18px 20px;
+            border-radius: 22px;
+            border: 1px solid rgba(176, 205, 255, 0.18);
+            background:
+                linear-gradient(135deg, rgba(255, 255, 255, 0.09), rgba(255, 255, 255, 0.03)),
+                linear-gradient(180deg, rgba(16, 28, 52, 0.88), rgba(12, 22, 43, 0.86));
+            color: var(--text);
+            backdrop-filter: blur(18px);
+            box-shadow: var(--shadow);
         }
-        .logout-form { margin: 0; }
-        .btn-logout {
-            border: 1px solid rgba(255, 255, 255, 0.5);
-            background: rgba(255, 255, 255, 0.14);
-            color: #f3f7ff;
-            border-radius: 10px;
-            padding: 7px 11px;
-            cursor: pointer;
-            font-size: 13px;
-            transition: background 0.2s ease, transform 0.2s ease;
+        .title-wrap {
+            display: grid;
+            gap: 4px;
         }
-        .btn-logout:hover { background: rgba(255, 255, 255, 0.24); transform: translateY(-1px); }
         .title {
             margin: 0;
-            font-size: 27px;
+            font-size: 28px;
+            font-weight: 750;
             letter-spacing: 0.2px;
-            font-weight: 700;
         }
-        .sub {
-            margin: 4px 0 0;
-            color: #cfddfa;
+        .subtitle {
+            margin: 0;
+            color: var(--text-soft);
             font-size: 13px;
+            line-height: 1.55;
+            max-width: 720px;
         }
-        .panel {
-            background: var(--panel);
-            border: 1px solid var(--line);
-            border-radius: 18px;
-            box-shadow: var(--shadow);
-            backdrop-filter: blur(12px);
-            padding: 14px;
-            animation: rise 0.35s ease both;
-        }
-        .stats {
-            margin-top: 12px;
-            display: grid;
-            grid-template-columns: repeat(5, minmax(110px, 1fr));
-            gap: 8px;
-        }
-        .status-panels {
-            margin-top: 12px;
-            display: grid;
-            grid-template-columns: repeat(2, minmax(280px, 1fr));
+        .topbar-actions {
+            display: flex;
+            flex-wrap: wrap;
+            align-items: flex-start;
+            justify-content: flex-end;
             gap: 10px;
         }
-        .status-panel {
-            background: linear-gradient(180deg, rgba(255, 255, 255, 0.96), rgba(244, 248, 255, 0.92));
-            border: 1px solid #d9e6fb;
-            border-radius: 14px;
-            padding: 12px;
+        .hover-group {
             position: relative;
-            overflow: hidden;
         }
-        .status-panel::before {
-            content: "";
-            position: absolute;
-            left: 0;
-            top: 0;
-            bottom: 0;
-            width: 4px;
-            background: linear-gradient(180deg, #60a5fa, #2dd4bf);
-        }
-        .status-panel.danger::before {
-            background: linear-gradient(180deg, #f97316, #dc2626);
-        }
-        .status-panel.warn::before {
-            background: linear-gradient(180deg, #f59e0b, #f97316);
-        }
-        .status-panel.ok::before {
-            background: linear-gradient(180deg, #10b981, #14b8a6);
-        }
-        .status-head {
-            display: flex;
+        .icon-chip,
+        .status-chip {
+            border: 1px solid rgba(176, 205, 255, 0.18);
+            background: rgba(255, 255, 255, 0.06);
+            color: #f6f9ff;
+            border-radius: 999px;
+            min-height: 40px;
+            display: inline-flex;
             align-items: center;
-            justify-content: space-between;
+            justify-content: center;
             gap: 8px;
-            margin-bottom: 10px;
-        }
-        .status-title {
-            margin: 0;
-            font-size: 16px;
-            font-weight: 700;
-        }
-        .status-summary {
+            padding: 0 14px;
             font-size: 12px;
             font-weight: 700;
-            border-radius: 999px;
-            padding: 4px 9px;
+            letter-spacing: 0.2px;
+            cursor: default;
+            transition: transform 0.18s ease, border-color 0.18s ease, background 0.18s ease;
         }
-        .status-grid {
+        .icon-chip {
+            width: 40px;
+            padding: 0;
+        }
+        .hover-group:hover .icon-chip,
+        .hover-group:focus-within .icon-chip,
+        .hover-group:hover .status-chip,
+        .hover-group:focus-within .status-chip {
+            transform: translateY(-1px);
+            border-color: rgba(206, 223, 255, 0.32);
+            background: rgba(255, 255, 255, 0.10);
+        }
+        .status-chip.ok { box-shadow: inset 0 0 0 1px rgba(34, 197, 94, 0.22); }
+        .status-chip.warn { box-shadow: inset 0 0 0 1px rgba(245, 158, 11, 0.22); }
+        .status-chip.danger { box-shadow: inset 0 0 0 1px rgba(239, 68, 68, 0.24); }
+        .chip-dot {
+            width: 10px;
+            height: 10px;
+            border-radius: 999px;
+            background: #d1d5db;
+            box-shadow: 0 0 0 6px rgba(255, 255, 255, 0.05);
+        }
+        .chip-dot.ok { background: var(--ok); }
+        .chip-dot.warn { background: var(--warn); }
+        .chip-dot.danger { background: var(--danger); }
+        .popover {
+            position: absolute;
+            top: calc(100% + 12px);
+            right: 0;
+            width: min(340px, calc(100vw - 28px));
+            padding: 14px;
+            border-radius: 18px;
+            border: 1px solid var(--line-strong);
+            background: rgba(250, 253, 255, 0.97);
+            color: #173059;
+            box-shadow: 0 20px 40px rgba(8, 17, 34, 0.22);
+            opacity: 0;
+            pointer-events: none;
+            transform: translateY(8px);
+            transition: opacity 0.18s ease, transform 0.18s ease;
+        }
+        .popover::before {
+            content: "";
+            position: absolute;
+            top: -7px;
+            right: 18px;
+            width: 14px;
+            height: 14px;
+            background: rgba(250, 253, 255, 0.97);
+            border-left: 1px solid var(--line-strong);
+            border-top: 1px solid var(--line-strong);
+            transform: rotate(45deg);
+        }
+        .hover-group:hover .popover,
+        .hover-group:focus-within .popover {
+            opacity: 1;
+            pointer-events: auto;
+            transform: translateY(0);
+        }
+        .popover-title {
+            margin: 0 0 10px;
+            font-size: 14px;
+            font-weight: 800;
+        }
+        .popover-grid {
             display: grid;
             grid-template-columns: repeat(2, minmax(0, 1fr));
             gap: 8px;
         }
-        .status-grid .kv {
-            min-height: 64px;
-        }
-        .stat {
+        .popover-item {
+            padding: 8px 10px;
             border-radius: 12px;
-            padding: 10px;
-            background: linear-gradient(180deg, #ffffff, #f8fbff);
-            border: 1px solid #d9e6fb;
-            position: relative;
-            overflow: hidden;
+            background: #f3f7ff;
+            border: 1px solid #dde8fb;
         }
-        .stat::before {
-            content: "";
-            position: absolute;
-            top: 0;
-            left: 0;
-            right: 0;
-            height: 3px;
-            background: linear-gradient(90deg, #3b82f6, #0ea5e9, #10b981);
-            opacity: 0.65;
-        }
-        .stat b {
+        .popover-label {
             display: block;
-            font-size: 20px;
-            margin-top: 4px;
-            letter-spacing: -0.2px;
+            font-size: 11px;
+            color: #6b7fa4;
+            margin-bottom: 3px;
         }
-        .actions {
-            margin-top: 14px;
+        .popover-value {
+            display: block;
+            font-size: 12px;
+            font-weight: 700;
+            line-height: 1.5;
+            word-break: break-word;
+        }
+        .logout-form { margin: 0; }
+        .btn-logout {
+            border: 1px solid rgba(176, 205, 255, 0.18);
+            background: rgba(255, 255, 255, 0.08);
+            color: #f5f9ff;
+            border-radius: 999px;
+            padding: 10px 14px;
+            cursor: pointer;
+            font-size: 13px;
+            font-weight: 700;
+            transition: transform 0.18s ease, border-color 0.18s ease, background 0.18s ease;
+        }
+        .btn-logout:hover {
+            transform: translateY(-1px);
+            background: rgba(255, 255, 255, 0.14);
+            border-color: rgba(214, 226, 255, 0.34);
+        }
+        .toolbar {
+            display: grid;
+            gap: 14px;
+            padding: 16px;
+            border-radius: 22px;
+            border: 1px solid rgba(176, 205, 255, 0.14);
+            background: rgba(10, 19, 38, 0.54);
+            backdrop-filter: blur(14px);
+            box-shadow: var(--shadow);
+        }
+        .toolbar-head {
+            display: flex;
+            flex-wrap: wrap;
+            align-items: center;
+            justify-content: space-between;
+            gap: 10px;
+        }
+        .toolbar-title {
+            margin: 0;
+            color: #eef5ff;
+            font-size: 18px;
+            font-weight: 750;
+        }
+        .toolbar-note {
+            margin: 4px 0 0;
+            color: var(--text-soft);
+            font-size: 12px;
+        }
+        .meta-pills {
             display: flex;
             flex-wrap: wrap;
             gap: 8px;
         }
+        .meta-pill {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            padding: 7px 11px;
+            border-radius: 999px;
+            background: rgba(255, 255, 255, 0.07);
+            border: 1px solid rgba(176, 205, 255, 0.14);
+            color: #edf4ff;
+            font-size: 12px;
+            font-weight: 700;
+        }
+        .add-form {
+            display: grid;
+            grid-template-columns: minmax(0, 1fr) auto;
+            gap: 10px;
+        }
         input[type="text"] {
-            flex: 1;
-            min-width: 220px;
-            border: 1px solid #bfd0ec;
-            border-radius: 10px;
-            padding: 10px 12px;
+            width: 100%;
+            border: 1px solid rgba(176, 205, 255, 0.16);
+            border-radius: 16px;
+            padding: 14px 16px;
             font-size: 14px;
-            background: #fff;
+            color: #173059;
+            background: rgba(250, 253, 255, 0.96);
+            box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.6);
+        }
+        input[type="text"]:focus {
+            outline: none;
+            border-color: rgba(94, 164, 255, 0.54);
+            box-shadow: 0 0 0 4px rgba(94, 164, 255, 0.14);
         }
         button {
             border: 0;
-            border-radius: 10px;
-            padding: 9px 13px;
+            border-radius: 16px;
+            padding: 0 16px;
+            min-height: 48px;
             font-size: 13px;
+            font-weight: 750;
             cursor: pointer;
-            background: linear-gradient(135deg, #2563eb, #1d4ed8);
+            background: linear-gradient(135deg, var(--brand), var(--brand-deep));
             color: #fff;
-            transition: transform 0.2s ease, box-shadow 0.2s ease;
+            transition: transform 0.18s ease, box-shadow 0.18s ease;
+            box-shadow: 0 12px 26px rgba(45, 109, 246, 0.24);
         }
         button:hover {
             transform: translateY(-1px);
-            box-shadow: 0 8px 18px rgba(37, 99, 235, 0.24);
+            box-shadow: 0 14px 30px rgba(45, 109, 246, 0.28);
         }
-        .btn-del {
-            background: #fff;
-            color: var(--danger);
-            border: 1px solid #f4c9c6;
-            padding: 6px 10px;
-        }
-        .btn-del:hover {
-            box-shadow: 0 8px 16px rgba(180, 35, 24, 0.16);
+        .flash-stack {
+            display: grid;
+            gap: 8px;
         }
         .msg {
-            margin-top: 10px;
-            padding: 9px 11px;
-            border-radius: 10px;
-            background: #e9f2ff;
+            padding: 11px 12px;
+            border-radius: 14px;
+            background: rgba(255, 255, 255, 0.94);
+            border: 1px solid #d4e3ff;
             color: #1c427b;
             font-size: 13px;
-            border: 1px solid #cde0ff;
+            box-shadow: 0 10px 22px rgba(14, 36, 76, 0.10);
+        }
+        .filter-bar {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+        }
+        .filter-chip {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            text-decoration: none;
+            padding: 9px 12px;
+            border-radius: 999px;
+            border: 1px solid rgba(176, 205, 255, 0.14);
+            background: rgba(255, 255, 255, 0.08);
+            color: #edf4ff;
+            font-size: 12px;
+            font-weight: 700;
+            transition: transform 0.18s ease, border-color 0.18s ease, background 0.18s ease;
+        }
+        .filter-chip:hover {
+            transform: translateY(-1px);
+            border-color: rgba(214, 226, 255, 0.28);
+            background: rgba(255, 255, 255, 0.12);
+        }
+        .filter-chip.active {
+            background: linear-gradient(135deg, rgba(94, 164, 255, 0.28), rgba(45, 109, 246, 0.32));
+            border-color: rgba(122, 183, 255, 0.36);
+        }
+        .filter-count {
+            display: inline-flex;
+            min-width: 24px;
+            justify-content: center;
+            padding: 2px 7px;
+            border-radius: 999px;
+            background: rgba(255, 255, 255, 0.14);
+            font-size: 11px;
+        }
+        .content {
+            display: grid;
+            gap: 12px;
+        }
+        .content-head {
+            display: flex;
+            flex-wrap: wrap;
+            align-items: baseline;
+            justify-content: space-between;
+            gap: 10px;
+        }
+        .content-title {
+            margin: 0;
+            color: #eef5ff;
+            font-size: 20px;
+            font-weight: 750;
+        }
+        .content-desc {
+            margin: 4px 0 0;
+            color: var(--text-soft);
+            font-size: 12px;
         }
         .cards {
-            margin-top: 12px;
             display: grid;
-            grid-template-columns: repeat(auto-fill, minmax(236px, 1fr));
-            gap: 9px;
+            grid-template-columns: repeat(auto-fill, minmax(265px, 1fr));
+            gap: 12px;
         }
         .card {
             background: var(--panel-strong);
-            border: 1px solid #d7e4fb;
-            border-radius: 12px;
-            padding: 10px;
-            transition: transform 0.2s ease, box-shadow 0.2s ease;
-            animation: rise 0.35s ease both;
+            border: 1px solid rgba(191, 210, 242, 0.76);
+            border-radius: 20px;
+            padding: 14px;
+            transition: transform 0.18s ease, box-shadow 0.18s ease, border-color 0.18s ease;
             position: relative;
             overflow: hidden;
+            box-shadow: 0 16px 34px rgba(10, 24, 54, 0.10);
         }
         .card::before {
             content: "";
             position: absolute;
-            left: 0;
-            right: 0;
-            top: 0;
-            height: 2px;
-            background: linear-gradient(90deg, #60a5fa, #2dd4bf);
-            opacity: 0.7;
+            inset: 0 auto auto 0;
+            width: 100%;
+            height: 3px;
+            background: linear-gradient(90deg, rgba(94, 164, 255, 0.85), rgba(32, 197, 161, 0.72));
         }
         .card:hover {
             transform: translateY(-2px);
-            box-shadow: 0 10px 24px rgba(35, 62, 111, 0.14);
+            box-shadow: 0 18px 38px rgba(10, 24, 54, 0.14);
+            border-color: rgba(153, 186, 240, 0.92);
         }
         .card-head {
             display: flex;
             justify-content: space-between;
-            align-items: center;
-            gap: 8px;
-            margin-bottom: 6px;
+            align-items: flex-start;
+            gap: 10px;
         }
         .domain {
             margin: 0;
             font-size: 15px;
-            font-weight: 700;
+            font-weight: 800;
+            color: #172a50;
             overflow-wrap: anywhere;
         }
-        .meta {
-            margin-top: 6px;
-            display: grid;
-            grid-template-columns: repeat(2, minmax(100px, 1fr));
+        .status-badge {
+            display: inline-flex;
+            align-items: center;
             gap: 6px;
+            border-radius: 999px;
+            padding: 5px 10px;
+            font-size: 11px;
+            font-weight: 800;
+            white-space: nowrap;
+        }
+        .status-badge.ok { color: #10753b; background: #e7f9ef; }
+        .status-badge.warn { color: #a36300; background: #fff4da; }
+        .status-badge.danger { color: #b42318; background: #fde9e7; }
+        .meta {
+            margin-top: 12px;
+            display: grid;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            gap: 8px;
         }
         .kv {
-            background: var(--brand-soft);
-            border: 1px solid #dce8fc;
-            border-radius: 8px;
-            padding: 6px 8px;
+            background: linear-gradient(180deg, #f7faff, #f1f6ff);
+            border: 1px solid #dbe7fb;
+            border-radius: 14px;
+            padding: 9px 10px;
         }
         .kv-label {
             display: block;
             font-size: 11px;
-            color: var(--muted);
-            margin-bottom: 2px;
+            color: #7588ab;
+            margin-bottom: 4px;
         }
         .kv-value {
+            display: block;
             font-size: 13px;
-            font-weight: 600;
+            font-weight: 700;
+            color: #173059;
             word-break: break-word;
+            line-height: 1.5;
         }
         .error-detail {
-            margin-top: 6px;
-            border: 1px solid #e3ebf8;
+            margin-top: 10px;
+            border: 1px solid #e2eaf8;
             background: #fbfdff;
-            border-radius: 8px;
-            padding: 4px 8px;
+            border-radius: 12px;
+            padding: 5px 9px;
         }
         .error-detail summary {
             cursor: pointer;
@@ -1058,192 +1259,375 @@ def index():
             user-select: none;
         }
         .error-text {
-            margin: 6px 0 0;
+            margin: 7px 0 0;
             white-space: pre-wrap;
             word-break: break-word;
-            color: #6a1d17;
+            color: #7b241c;
             font-size: 12px;
-            line-height: 1.45;
+            line-height: 1.5;
         }
         .card-actions {
-            margin-top: 8px;
+            margin-top: 12px;
             display: flex;
             justify-content: flex-end;
         }
-        .status {
-            display: inline-block;
-            border-radius: 999px;
-            padding: 3px 8px;
-            font-size: 11px;
-            font-weight: 700;
-            letter-spacing: 0.2px;
+        .btn-del {
+            min-height: 36px;
+            padding: 0 12px;
+            background: #fff;
+            color: #be2f23;
+            border: 1px solid #f2c9c4;
+            box-shadow: none;
         }
-        .ok { color: var(--ok); background: #e9f8ee; }
-        .warn { color: var(--warn); background: #fff7e1; }
-        .danger { color: var(--danger); background: #fdeceb; }
+        .btn-del:hover {
+            box-shadow: 0 10px 22px rgba(190, 47, 35, 0.12);
+        }
         .empty {
             text-align: center;
-            color: var(--muted);
-            padding: 32px 10px;
-            background: #fff;
-            border-radius: 12px;
-            border: 1px dashed #bfd3f3;
+            color: var(--text-soft);
+            padding: 42px 12px;
+            border-radius: 20px;
+            background: rgba(255, 255, 255, 0.06);
+            border: 1px dashed rgba(176, 205, 255, 0.18);
         }
-        .tiny {
-            color: var(--muted);
+        .floating-alert {
+            position: fixed;
+            left: 18px;
+            bottom: 18px;
+            z-index: 30;
+            max-width: min(360px, calc(100vw - 36px));
+            color: #fff8f0;
+        }
+        .floating-trigger {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            padding: 12px 14px;
+            border-radius: 18px;
+            border: 1px solid rgba(245, 158, 11, 0.28);
+            background: linear-gradient(135deg, rgba(78, 34, 9, 0.92), rgba(116, 38, 10, 0.92));
+            box-shadow: 0 20px 42px rgba(65, 26, 7, 0.30);
+            backdrop-filter: blur(16px);
+        }
+        .floating-trigger strong {
+            display: block;
+            font-size: 13px;
+            margin-bottom: 2px;
+        }
+        .floating-trigger span {
+            display: block;
+            font-size: 11px;
+            color: rgba(255, 241, 223, 0.82);
+        }
+        .pulse-dot {
+            width: 12px;
+            height: 12px;
+            border-radius: 999px;
+            background: #fbbf24;
+            box-shadow: 0 0 0 0 rgba(251, 191, 36, 0.42);
+            animation: pulse 1.8s infinite;
+            flex: 0 0 auto;
+        }
+        .floating-panel {
+            position: absolute;
+            left: 0;
+            bottom: calc(100% + 12px);
+            width: 100%;
+            padding: 14px;
+            border-radius: 18px;
+            border: 1px solid rgba(247, 207, 140, 0.34);
+            background: rgba(255, 250, 244, 0.98);
+            color: #5b2b08;
+            box-shadow: 0 24px 48px rgba(65, 26, 7, 0.22);
+            opacity: 0;
+            pointer-events: none;
+            transform: translateY(8px);
+            transition: opacity 0.18s ease, transform 0.18s ease;
+        }
+        .floating-alert:hover .floating-panel,
+        .floating-alert:focus-within .floating-panel {
+            opacity: 1;
+            pointer-events: auto;
+            transform: translateY(0);
+        }
+        .floating-head {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 10px;
+            margin-bottom: 10px;
+        }
+        .floating-head strong {
+            font-size: 14px;
+        }
+        .floating-link {
+            text-decoration: none;
             font-size: 12px;
+            font-weight: 700;
+            color: #9a4f0a;
+        }
+        .floating-list {
+            display: grid;
+            gap: 8px;
+        }
+        .floating-item {
+            padding: 9px 10px;
+            border-radius: 12px;
+            background: #fff7ee;
+            border: 1px solid #f6debf;
+        }
+        .floating-item-top {
+            display: flex;
+            justify-content: space-between;
+            gap: 8px;
+            margin-bottom: 4px;
+        }
+        .floating-domain {
+            font-size: 12px;
+            font-weight: 800;
+            overflow-wrap: anywhere;
+        }
+        .floating-meta {
+            font-size: 11px;
+            line-height: 1.55;
+            color: #8a4a10;
         }
         .inline-form { margin: 0; }
-        @keyframes rise {
-            from { opacity: 0; transform: translateY(8px); }
-            to { opacity: 1; transform: translateY(0); }
+        @keyframes pulse {
+            0% { box-shadow: 0 0 0 0 rgba(251, 191, 36, 0.46); }
+            70% { box-shadow: 0 0 0 10px rgba(251, 191, 36, 0); }
+            100% { box-shadow: 0 0 0 0 rgba(251, 191, 36, 0); }
         }
-        @media (max-width: 900px) {
-            .status-panels { grid-template-columns: 1fr; }
-            .stats { grid-template-columns: repeat(2, minmax(120px, 1fr)); }
-            .title { font-size: 22px; }
-            .cards { grid-template-columns: repeat(auto-fill, minmax(210px, 1fr)); }
+        @media (max-width: 940px) {
+            .topbar {
+                position: static;
+                padding: 16px;
+            }
+            .topbar-actions {
+                width: 100%;
+                justify-content: flex-start;
+            }
+            .add-form {
+                grid-template-columns: 1fr;
+            }
+        }
+        @media (max-width: 720px) {
+            body {
+                padding-bottom: 120px;
+            }
+            .popover {
+                left: 0;
+                right: auto;
+                width: min(320px, calc(100vw - 28px));
+            }
+            .popover::before {
+                left: 18px;
+                right: auto;
+            }
+            .popover-grid {
+                grid-template-columns: 1fr;
+            }
+            .cards {
+                grid-template-columns: 1fr;
+            }
+            .meta {
+                grid-template-columns: 1fr;
+            }
         }
         @media (max-width: 560px) {
-            .panel { padding: 12px; }
-            .stats { grid-template-columns: repeat(2, minmax(94px, 1fr)); }
-            .stat b { font-size: 18px; }
-            .cards { grid-template-columns: 1fr; }
-            .meta { grid-template-columns: 1fr; }
+            .container {
+                gap: 12px;
+            }
+            .title {
+                font-size: 24px;
+            }
+            .filter-bar,
+            .meta-pills {
+                gap: 7px;
+            }
+            .filter-chip,
+            .meta-pill {
+                font-size: 11px;
+            }
         }
     </style>
     </head>
     <body>
         <div class="container">
-            <div class="header">
-                <div>
+            <header class="topbar">
+                <div class="title-wrap">
                     <h1 class="title">SSL 证书监控仪表盘</h1>
-                    <p class="sub">最后刷新时间：{{ now }}</p>
+                    <p class="subtitle">最后刷新时间 {{ now }}。当前筛选 {{ current_filter_label }}，共展示 {{ filtered_results|length }} / {{ stats.total }} 个域名。</p>
                 </div>
-                <form method="post" action="{{ url_for('logout') }}" class="logout-form">
-                    <button type="submit" class="btn-logout">退出登录</button>
-                </form>
-            </div>
 
-            <div class="panel">
-                <form method="post" action="{{ url_for('add_domain') }}" class="actions">
+                <div class="topbar-actions">
+                    <div class="hover-group" tabindex="0">
+                        <div class="status-chip {{ timer_panel.health_level }}">
+                            <span class="chip-dot {{ timer_panel.health_level }}"></span>
+                            <span>检测</span>
+                        </div>
+                        <div class="popover">
+                            <p class="popover-title">后台定时检测</p>
+                            <div class="popover-grid">
+                                <div class="popover-item">
+                                    <span class="popover-label">状态</span>
+                                    <span class="popover-value">{{ timer_panel.health_text }}</span>
+                                </div>
+                                <div class="popover-item">
+                                    <span class="popover-label">调度周期</span>
+                                    <span class="popover-value">{{ timer_panel.schedule_text }}</span>
+                                </div>
+                                <div class="popover-item">
+                                    <span class="popover-label">最近开始</span>
+                                    <span class="popover-value">{{ timer_panel.last_started_at }}</span>
+                                </div>
+                                <div class="popover-item">
+                                    <span class="popover-label">最近完成</span>
+                                    <span class="popover-value">{{ timer_panel.last_completed_at }}</span>
+                                </div>
+                                <div class="popover-item">
+                                    <span class="popover-label">执行结果</span>
+                                    <span class="popover-value">{{ timer_panel.last_status_text }}</span>
+                                </div>
+                                <div class="popover-item">
+                                    <span class="popover-label">执行摘要</span>
+                                    <span class="popover-value">{{ timer_panel.summary_text }}</span>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="hover-group" tabindex="0">
+                        <div class="status-chip {{ email_panel.health_level }}">
+                            <span class="chip-dot {{ email_panel.health_level }}"></span>
+                            <span>邮件</span>
+                        </div>
+                        <div class="popover">
+                            <p class="popover-title">邮件提醒状态</p>
+                            <div class="popover-grid">
+                                <div class="popover-item">
+                                    <span class="popover-label">状态</span>
+                                    <span class="popover-value">{{ email_panel.health_text }}</span>
+                                </div>
+                                <div class="popover-item">
+                                    <span class="popover-label">SMTP</span>
+                                    <span class="popover-value">{{ email_panel.server_text }}</span>
+                                </div>
+                                <div class="popover-item">
+                                    <span class="popover-label">收件人</span>
+                                    <span class="popover-value">{{ email_panel.recipient_text }}</span>
+                                </div>
+                                <div class="popover-item">
+                                    <span class="popover-label">最近发送时间</span>
+                                    <span class="popover-value">{{ email_panel.last_attempt_at }}</span>
+                                </div>
+                                <div class="popover-item">
+                                    <span class="popover-label">最近触发域名</span>
+                                    <span class="popover-value">{{ email_panel.last_attempt_domain }}</span>
+                                </div>
+                                <div class="popover-item">
+                                    <span class="popover-label">最近触发原因</span>
+                                    <span class="popover-value">{{ email_panel.last_attempt_reason }}</span>
+                                </div>
+                            </div>
+                            {% if email_panel.last_attempt_error %}
+                            <div class="popover-item" style="margin-top:8px;">
+                                <span class="popover-label">最近错误</span>
+                                <span class="popover-value">{{ email_panel.last_attempt_error }}</span>
+                            </div>
+                            {% endif %}
+                        </div>
+                    </div>
+
+                    <div class="hover-group" tabindex="0">
+                        <div class="icon-chip">i</div>
+                        <div class="popover">
+                            <p class="popover-title">提醒规则</p>
+                            <div class="popover-grid">
+                                <div class="popover-item">
+                                    <span class="popover-label">里程碑</span>
+                                    <span class="popover-value">{{ milestones_text }} 天</span>
+                                </div>
+                                <div class="popover-item">
+                                    <span class="popover-label">每日提醒</span>
+                                    <span class="popover-value">{% if enable_daily_reminder %}临期（<= {{ alert_days }} 天）每日最多 1 封{% else %}已关闭{% endif %}</span>
+                                </div>
+                                <div class="popover-item">
+                                    <span class="popover-label">排序规则</span>
+                                    <span class="popover-value">按剩余天数从小到大，连接失败排最后</span>
+                                </div>
+                                <div class="popover-item">
+                                    <span class="popover-label">域名存储</span>
+                                    <span class="popover-value">{{ domains_file }}</span>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <form method="post" action="{{ url_for('logout') }}" class="logout-form">
+                        <button type="submit" class="btn-logout">退出登录</button>
+                    </form>
+                </div>
+            </header>
+
+            <section class="toolbar">
+                <div class="toolbar-head">
+                    <div>
+                        <h2 class="toolbar-title">域名控制台</h2>
+                        <p class="toolbar-note">把添加域名、筛选视图和运行提示收在这里，列表区域只保留真正的域名内容。</p>
+                    </div>
+                    <div class="meta-pills">
+                        <span class="meta-pill"><span class="chip-dot {{ timer_panel.health_level }}"></span>{{ timer_panel.health_text }}</span>
+                        <span class="meta-pill"><span class="chip-dot {{ email_panel.health_level }}"></span>{{ email_panel.health_text }}</span>
+                        <span class="meta-pill">总域名 {{ stats.total }}</span>
+                    </div>
+                </div>
+
+                <form method="post" action="{{ url_for('add_domain') }}" class="add-form">
                     <input type="text" name="domain" placeholder="输入域名，例如 example.com 或 https://example.com" required>
                     <button type="submit">添加检测域名</button>
                 </form>
-                <p class="tiny">域名会保存到 {{ domains_file }}，服务重启后仍保留。</p>
-                <p class="tiny">
-                    当前提醒策略：
-                    里程碑 {{ milestones_text }} 天；
-                    {% if enable_daily_reminder %}
-                    临期（<= {{ alert_days }} 天）每日最多 1 封。
-                    {% else %}
-                    已关闭每日提醒。
-                    {% endif %}
-                </p>
-                <p class="tiny">后台检测调度：{{ timer_panel.schedule_text }}。页面刷新只展示结果，不触发邮件发送。</p>
-                <p class="tiny">排序规则：按剩余天数从小到大，连接失败项排在最后。</p>
 
                 {% with messages = get_flashed_messages() %}
                     {% if messages %}
+                    <div class="flash-stack">
                         {% for msg in messages %}
-                            <div class="msg">{{ msg }}</div>
+                        <div class="msg">{{ msg }}</div>
                         {% endfor %}
+                    </div>
                     {% endif %}
                 {% endwith %}
 
-                <div class="status-panels">
-                    <section class="status-panel {{ timer_panel.health_level }}">
-                        <div class="status-head">
-                            <h2 class="status-title">{{ timer_panel.title }}</h2>
-                            <span class="status-summary {% if timer_panel.health_level == 'ok' %}ok{% elif timer_panel.health_level == 'warn' %}warn{% else %}danger{% endif %}">
-                                {{ timer_panel.health_text }}
-                            </span>
-                        </div>
-                        <div class="status-grid">
-                            <div class="kv">
-                                <span class="kv-label">调度周期</span>
-                                <span class="kv-value">{{ timer_panel.schedule_text }}</span>
-                            </div>
-                            <div class="kv">
-                                <span class="kv-label">最近执行结果</span>
-                                <span class="kv-value">{{ timer_panel.last_status_text }}</span>
-                            </div>
-                            <div class="kv">
-                                <span class="kv-label">最近开始时间</span>
-                                <span class="kv-value">{{ timer_panel.last_started_at }}</span>
-                            </div>
-                            <div class="kv">
-                                <span class="kv-label">最近完成时间</span>
-                                <span class="kv-value">{{ timer_panel.last_completed_at }}</span>
-                            </div>
-                            <div class="kv">
-                                <span class="kv-label">执行摘要</span>
-                                <span class="kv-value">{{ timer_panel.summary_text }}</span>
-                            </div>
-                            <div class="kv">
-                                <span class="kv-label">异常信息</span>
-                                <span class="kv-value">{{ timer_panel.last_error or '-' }}</span>
-                            </div>
-                        </div>
-                    </section>
-
-                    <section class="status-panel {{ email_panel.health_level }}">
-                        <div class="status-head">
-                            <h2 class="status-title">{{ email_panel.title }}</h2>
-                            <span class="status-summary {% if email_panel.health_level == 'ok' %}ok{% elif email_panel.health_level == 'warn' %}warn{% else %}danger{% endif %}">
-                                {{ email_panel.health_text }}
-                            </span>
-                        </div>
-                        <div class="status-grid">
-                            <div class="kv">
-                                <span class="kv-label">收件人</span>
-                                <span class="kv-value">{{ email_panel.recipient_text }}</span>
-                            </div>
-                            <div class="kv">
-                                <span class="kv-label">SMTP 服务</span>
-                                <span class="kv-value">{{ email_panel.server_text }}</span>
-                            </div>
-                            <div class="kv">
-                                <span class="kv-label">最近发送时间</span>
-                                <span class="kv-value">{{ email_panel.last_attempt_at }}</span>
-                            </div>
-                            <div class="kv">
-                                <span class="kv-label">最近发送结果</span>
-                                <span class="kv-value">{{ email_panel.last_attempt_text }}</span>
-                            </div>
-                            <div class="kv">
-                                <span class="kv-label">最近触发域名</span>
-                                <span class="kv-value">{{ email_panel.last_attempt_domain }}</span>
-                            </div>
-                            <div class="kv">
-                                <span class="kv-label">最近触发原因</span>
-                                <span class="kv-value">{{ email_panel.last_attempt_reason }}</span>
-                            </div>
-                        </div>
-                        {% if email_panel.last_attempt_error %}
-                        <details class="error-detail">
-                            <summary>查看最近邮件错误</summary>
-                            <pre class="error-text">{{ email_panel.last_attempt_error }}</pre>
-                        </details>
-                        {% endif %}
-                    </section>
+                <div class="filter-bar">
+                    {% for tab in filter_tabs %}
+                    <a href="{{ tab.href }}" class="filter-chip{% if tab.active %} active{% endif %}">
+                        <span>{{ tab.label }}</span>
+                        <span class="filter-count">{{ tab.count }}</span>
+                    </a>
+                    {% endfor %}
                 </div>
+            </section>
 
-                <div class="stats">
-                    <div class="stat">总域名<b>{{ stats.total }}</b></div>
-                    <div class="stat">正常<b>{{ stats.normal }}</b></div>
-                    <div class="stat">即将过期<b>{{ stats.warning }}</b></div>
-                    <div class="stat">已过期<b>{{ stats.expired }}</b></div>
-                    <div class="stat">连接失败<b>{{ stats.failed }}</b></div>
+            <section class="content">
+                <div class="content-head">
+                    <div>
+                        <h2 class="content-title">域名列表</h2>
+                        <p class="content-desc">状态通过颜色和标签区分。需要更多上下文时，查看顶部状态悬浮面板或域名卡片内的详细字段。</p>
+                    </div>
+                    <div class="meta-pills">
+                        <span class="meta-pill">当前筛选 {{ current_filter_label }}</span>
+                        <span class="meta-pill">显示 {{ filtered_results|length }} / {{ stats.total }}</span>
+                    </div>
                 </div>
 
                 <div class="cards">
-                    {% if results %}
-                        {% for res in results %}
+                    {% if filtered_results %}
+                        {% for res in filtered_results %}
                         <article class="card">
                             <div class="card-head">
                                 <h3 class="domain">{{ res.domain }}</h3>
-                                <span class="status {% if res.status == '正常' %}ok{% elif res.status == '即将过期' %}warn{% else %}danger{% endif %}">
+                                <span class="status-badge {% if res.status == '正常' %}ok{% elif res.status == '即将过期' %}warn{% else %}danger{% endif %}">
+                                    <span class="chip-dot {% if res.status == '正常' %}ok{% elif res.status == '即将过期' %}warn{% else %}danger{% endif %}"></span>
                                     {{ res.status }}
                                 </span>
                             </div>
@@ -1276,11 +1660,43 @@ def index():
                         </article>
                         {% endfor %}
                     {% else %}
-                    <div class="empty">当前没有检测域名，请先添加一个域名。</div>
+                    <div class="empty">当前筛选条件下没有匹配域名，可以切换上方筛选查看其他状态。</div>
                     {% endif %}
+                </div>
+            </section>
+        </div>
+
+        {% if priority_results %}
+        <div class="floating-alert" tabindex="0">
+            <div class="floating-trigger">
+                <span class="pulse-dot"></span>
+                <div>
+                    <strong>有 {{ priority_results|length }} 个域名需要优先处理</strong>
+                    <span>悬停或聚焦即可查看明细</span>
+                </div>
+            </div>
+            <div class="floating-panel">
+                <div class="floating-head">
+                    <strong>优先处理域名</strong>
+                    <a href="{{ url_for('index', view='attention') }}" class="floating-link">查看全部</a>
+                </div>
+                <div class="floating-list">
+                    {% for res in spotlight_results %}
+                    <div class="floating-item">
+                        <div class="floating-item-top">
+                            <span class="floating-domain">{{ res.domain }}</span>
+                            <span class="status-badge {% if res.status == '即将过期' %}warn{% else %}danger{% endif %}">{{ res.status }}</span>
+                        </div>
+                        <div class="floating-meta">
+                            过期时间：{{ res.expiry }}<br>
+                            剩余天数：{{ res.days_left }}
+                        </div>
+                    </div>
+                    {% endfor %}
                 </div>
             </div>
         </div>
+        {% endif %}
     </body>
     </html>
     """
@@ -1295,6 +1711,11 @@ def index():
         alert_days=ALERT_DAYS,
         timer_panel=timer_panel,
         email_panel=email_panel,
+        filter_tabs=filter_tabs,
+        current_filter_label=current_filter_label,
+        filtered_results=filtered_results,
+        priority_results=priority_results,
+        spotlight_results=spotlight_results,
     )
 
 
