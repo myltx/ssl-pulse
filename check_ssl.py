@@ -1,3 +1,4 @@
+import argparse
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 import json
@@ -392,7 +393,7 @@ def maybe_send_alert(domain, expiry_date, days_left):
         save_alert_state(state)
 
 
-def get_cert_expiry(domain):
+def get_cert_expiry(domain, send_alerts=True):
     try:
         context = ssl.create_default_context()
         with socket.create_connection((domain, 443), timeout=10) as sock:
@@ -402,7 +403,8 @@ def get_cert_expiry(domain):
                 expiry_date = datetime.strptime(expiry_str, "%b %d %H:%M:%S %Y %Z")
                 days_left = (expiry_date - datetime.now()).days
 
-                maybe_send_alert(domain, expiry_date, days_left)
+                if send_alerts:
+                    maybe_send_alert(domain, expiry_date, days_left)
 
                 return {
                     "domain": domain,
@@ -427,12 +429,70 @@ def get_cert_expiry(domain):
         }
 
 
-def check_all_domains(domains):
+def check_all_domains(domains, send_alerts=True):
     if not domains:
         return []
     max_workers = min(8, len(domains))
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        return list(executor.map(get_cert_expiry, domains))
+        return list(executor.map(lambda domain: get_cert_expiry(domain, send_alerts=send_alerts), domains))
+
+
+def build_stats(results):
+    return {
+        "total": len(results),
+        "normal": sum(1 for r in results if r["status"] == "正常"),
+        "warning": sum(1 for r in results if r["status"] == "即将过期"),
+        "expired": sum(1 for r in results if r["status"] == "已过期"),
+        "failed": sum(1 for r in results if r["status"] == "连接失败"),
+    }
+
+
+def run_check_cycle(send_alerts):
+    domains = get_domains()
+    results = check_all_domains(domains, send_alerts=send_alerts)
+
+    def result_sort_key(item):
+        days_left = item.get("days_left")
+        if isinstance(days_left, int):
+            return (0, days_left)
+        return (1, 10**9)
+
+    results = sorted(results, key=result_sort_key)
+    return results, build_stats(results)
+
+
+def run_check_once():
+    started_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    print(f"[检查] 开始执行 SSL 检测: {started_at}")
+    results, stats = run_check_cycle(send_alerts=True)
+
+    if not results:
+        print("[检查] 当前没有配置任何域名，跳过检测。")
+        return 0
+
+    for item in results:
+        error_suffix = f" | 错误: {item['error']}" if item.get("error") else ""
+        print(
+            f"[检查] {item['domain']} | 状态: {item['status']} | 过期时间: {item['expiry']} | "
+            f"剩余天数: {item['days_left']}{error_suffix}"
+        )
+
+    print(
+        "[检查] 完成: "
+        f"总数={stats['total']} 正常={stats['normal']} 即将过期={stats['warning']} "
+        f"已过期={stats['expired']} 连接失败={stats['failed']}"
+    )
+    return 0
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="SSL Pulse 证书监控")
+    parser.add_argument(
+        "--check-only",
+        action="store_true",
+        help="执行一次检测并退出，适合 systemd timer 或 cron 调用",
+    )
+    return parser.parse_args()
 
 
 @app.post("/domains")
@@ -477,24 +537,8 @@ def delete_domain():
 
 @app.route("/")
 def index():
-    domains = get_domains()
-    results = check_all_domains(domains)
-
-    def result_sort_key(item):
-        days_left = item.get("days_left")
-        if isinstance(days_left, int):
-            return (0, days_left)
-        return (1, 10**9)
-
-    results = sorted(results, key=result_sort_key)
+    results, stats = run_check_cycle(send_alerts=False)
     milestones = parse_milestones()
-    stats = {
-        "total": len(results),
-        "normal": sum(1 for r in results if r["status"] == "正常"),
-        "warning": sum(1 for r in results if r["status"] == "即将过期"),
-        "expired": sum(1 for r in results if r["status"] == "已过期"),
-        "failed": sum(1 for r in results if r["status"] == "连接失败"),
-    }
 
     html_template = """
     <!DOCTYPE html>
@@ -897,8 +941,17 @@ def index():
     )
 
 
-if __name__ == "__main__":
+def main():
+    args = parse_args()
+    if args.check_only:
+        return run_check_once()
+
     port = int(os.getenv("PORT", "2026"))
     if DASHBOARD_PASSWORD == "admin123456":
         print("[安全提示] 正在使用默认访问密码，请尽快通过环境变量 DASHBOARD_PASSWORD 修改。")
     app.run(host="0.0.0.0", port=port)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

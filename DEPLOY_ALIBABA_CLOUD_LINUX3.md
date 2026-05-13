@@ -37,6 +37,8 @@ http://127.0.0.1:2026
 - `update_python_alinux3.sh`（需要先升级 Python 时使用）
 - `DEPLOY_ALIBABA_CLOUD_LINUX3.md`（部署说明）
 - `ssl-monitor.service`（仅手工部署时使用，一键脚本不依赖这个文件）
+- `ssl-monitor-check.service`（仅手工部署时使用，一键脚本不依赖这个文件）
+- `ssl-monitor-check.timer`（仅手工部署时使用，一键脚本不依赖这个文件）
 
 ## 2. 推荐方式：一键脚本后台部署
 
@@ -77,6 +79,7 @@ sudo env PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple PIP_TRUSTED_HOST
 - 安装 `python3` 与 `python3-pip`
 - 创建虚拟环境 `.venv` 并安装依赖
 - 生成 systemd 服务 `ssl-monitor`
+- 生成定时检测任务 `ssl-monitor-check.timer`
 - 设置开机自启并立即启动
 - 如果 `firewalld` 已启用，自动放行端口
 
@@ -118,6 +121,8 @@ python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 sudo cp ssl-monitor.service /etc/systemd/system/ssl-monitor.service
+sudo cp ssl-monitor-check.service /etc/systemd/system/ssl-monitor-check.service
+sudo cp ssl-monitor-check.timer /etc/systemd/system/ssl-monitor-check.timer
 sudo tee /root/ssl-pulse/.ssl_pulse.env >/dev/null <<'EOF'
 PORT="2026"
 PYTHONUNBUFFERED="1"
@@ -127,6 +132,7 @@ SESSION_TTL_MINUTES="720"
 ALERT_DAYS="30"
 ALERT_MILESTONES="30,15,7,3,1"
 ENABLE_DAILY_REMINDER="true"
+CHECK_ON_CALENDAR="hourly"
 SMTP_SERVER=""
 SMTP_PORT="587"
 SMTP_USER=""
@@ -137,8 +143,16 @@ EOF
 sudo chmod 600 /root/ssl-pulse/.ssl_pulse.env
 sudo systemctl daemon-reload
 sudo systemctl enable --now ssl-monitor
+sudo systemctl enable --now ssl-monitor-check.timer
+sudo systemctl start ssl-monitor-check.service
 sudo systemctl status ssl-monitor --no-pager
+sudo systemctl status ssl-monitor-check.timer --no-pager
 ```
+
+说明：
+
+- `ssl-monitor-check.timer` 模板默认每小时执行一次。
+- 如果你想改频率，请直接编辑 `/etc/systemd/system/ssl-monitor-check.timer` 里的 `OnCalendar=`，然后执行 `sudo systemctl daemon-reload && sudo systemctl restart ssl-monitor-check.timer`。
 
 ## 5. 安全组与防火墙
 
@@ -178,6 +192,7 @@ sudo vi /root/ssl-pulse/.ssl_pulse.env
 - `ALERT_DAYS`（默认 30）
 - `ALERT_MILESTONES`（默认 `30,15,7,3,1`）
 - `ENABLE_DAILY_REMINDER`（`true/false`）
+- `CHECK_ON_CALENDAR`（供一键部署脚本生成 timer，默认 `hourly`）
 - `DOMAINS`（可选，逗号分隔；通常建议用页面管理和 `domains.json`）
 
 修改后重启服务生效：
@@ -186,10 +201,13 @@ sudo vi /root/ssl-pulse/.ssl_pulse.env
 sudo systemctl restart ssl-monitor
 ```
 
+如果你修改了 `CHECK_ON_CALENDAR`，需要重新执行一键部署脚本生成新的 timer 文件，或手动编辑 `/etc/systemd/system/ssl-monitor-check.timer` 后 `daemon-reload`。
+
 说明：
 
 - 仅当 SMTP 相关字段都非空时才会发送邮件。
 - 默认提醒策略是“里程碑 + 每日兜底”。
+- 后台定时任务负责主动检测和发邮件，打开网页只做展示，不再作为提醒触发条件。
 - 提醒状态存储在 `alert_state.json`。
 
 ## 7. 常用运维命令
@@ -198,6 +216,9 @@ sudo systemctl restart ssl-monitor
 sudo systemctl status ssl-monitor --no-pager
 sudo systemctl restart ssl-monitor
 sudo journalctl -u ssl-monitor -f
+sudo journalctl -u ssl-monitor-check.service -f
+sudo systemctl status ssl-monitor-check.timer --no-pager
+sudo systemctl start ssl-monitor-check.service
 ss -lntp | grep 2026
 ```
 
@@ -208,4 +229,6 @@ ss -lntp | grep 2026
 ```bash
 cd /root/ssl-pulse
 sudo systemctl restart ssl-monitor
+sudo systemctl restart ssl-monitor-check.timer
+sudo systemctl start ssl-monitor-check.service
 ```

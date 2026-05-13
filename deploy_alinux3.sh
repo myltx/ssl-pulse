@@ -10,6 +10,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 APP_DIR="${APP_DIR:-${SCRIPT_DIR}}"
 SERVICE_NAME="${SERVICE_NAME:-ssl-monitor}"
+CHECK_SERVICE_NAME="${CHECK_SERVICE_NAME:-${SERVICE_NAME}-check}"
 PORT="${PORT:-2026}"
 PYTHON_BIN="${PYTHON_BIN:-/usr/bin/python3}"
 PIP_INDEX_URL="${PIP_INDEX_URL:-https://mirrors.aliyun.com/pypi/simple/}"
@@ -21,6 +22,7 @@ DOMAINS="${DOMAINS:-}"
 ALERT_DAYS="${ALERT_DAYS:-}"
 ALERT_MILESTONES="${ALERT_MILESTONES:-}"
 ENABLE_DAILY_REMINDER="${ENABLE_DAILY_REMINDER:-}"
+CHECK_ON_CALENDAR="${CHECK_ON_CALENDAR:-}"
 SMTP_SERVER="${SMTP_SERVER:-}"
 SMTP_PORT="${SMTP_PORT:-}"
 SMTP_USER="${SMTP_USER:-}"
@@ -120,6 +122,7 @@ DOMAINS="$(use_env_or_existing_or_default "${DOMAINS}" "DOMAINS" "")"
 ALERT_DAYS="$(use_env_or_existing_or_default "${ALERT_DAYS}" "ALERT_DAYS" "30")"
 ALERT_MILESTONES="$(use_env_or_existing_or_default "${ALERT_MILESTONES}" "ALERT_MILESTONES" "30,15,7,3,1")"
 ENABLE_DAILY_REMINDER="$(use_env_or_existing_or_default "${ENABLE_DAILY_REMINDER}" "ENABLE_DAILY_REMINDER" "true")"
+CHECK_ON_CALENDAR="$(use_env_or_existing_or_default "${CHECK_ON_CALENDAR}" "CHECK_ON_CALENDAR" "hourly")"
 SMTP_SERVER="$(use_env_or_existing_or_default "${SMTP_SERVER}" "SMTP_SERVER" "")"
 SMTP_PORT="$(use_env_or_existing_or_default "${SMTP_PORT}" "SMTP_PORT" "587")"
 SMTP_USER="$(use_env_or_existing_or_default "${SMTP_USER}" "SMTP_USER" "")"
@@ -166,6 +169,7 @@ DOMAINS_ESCAPED="$(escape_for_env_file "${DOMAINS}")"
 ALERT_DAYS_ESCAPED="$(escape_for_env_file "${ALERT_DAYS}")"
 ALERT_MILESTONES_ESCAPED="$(escape_for_env_file "${ALERT_MILESTONES}")"
 ENABLE_DAILY_REMINDER_ESCAPED="$(escape_for_env_file "${ENABLE_DAILY_REMINDER}")"
+CHECK_ON_CALENDAR_ESCAPED="$(escape_for_env_file "${CHECK_ON_CALENDAR}")"
 SMTP_SERVER_ESCAPED="$(escape_for_env_file "${SMTP_SERVER}")"
 SMTP_PORT_ESCAPED="$(escape_for_env_file "${SMTP_PORT}")"
 SMTP_USER_ESCAPED="$(escape_for_env_file "${SMTP_USER}")"
@@ -182,6 +186,7 @@ DOMAINS="${DOMAINS_ESCAPED}"
 ALERT_DAYS="${ALERT_DAYS_ESCAPED}"
 ALERT_MILESTONES="${ALERT_MILESTONES_ESCAPED}"
 ENABLE_DAILY_REMINDER="${ENABLE_DAILY_REMINDER_ESCAPED}"
+CHECK_ON_CALENDAR="${CHECK_ON_CALENDAR_ESCAPED}"
 SMTP_SERVER="${SMTP_SERVER_ESCAPED}"
 SMTP_PORT="${SMTP_PORT_ESCAPED}"
 SMTP_USER="${SMTP_USER_ESCAPED}"
@@ -208,10 +213,39 @@ RestartSec=3
 WantedBy=multi-user.target
 EOF
 
+cat >"/etc/systemd/system/${CHECK_SERVICE_NAME}.service" <<EOF
+[Unit]
+Description=SSL Monitoring Periodic Check
+After=network.target
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=${APP_DIR}
+ExecStart=${APP_DIR}/.venv/bin/python ${APP_DIR}/check_ssl.py --check-only
+EnvironmentFile=${ENV_FILE}
+EOF
+
+cat >"/etc/systemd/system/${CHECK_SERVICE_NAME}.timer" <<EOF
+[Unit]
+Description=Run SSL Monitoring Check on Schedule
+
+[Timer]
+OnCalendar=${CHECK_ON_CALENDAR}
+Persistent=true
+RandomizedDelaySec=300
+Unit=${CHECK_SERVICE_NAME}.service
+
+[Install]
+WantedBy=timers.target
+EOF
+
 echo "[4/5] Enable and start service..."
 systemctl daemon-reload
 systemctl enable --now "${SERVICE_NAME}"
 systemctl restart "${SERVICE_NAME}"
+systemctl enable --now "${CHECK_SERVICE_NAME}.timer"
+systemctl start "${CHECK_SERVICE_NAME}.service"
 
 echo "[5/5] Open firewall port if firewalld is enabled..."
 if command -v firewall-cmd >/dev/null 2>&1 && firewall-cmd --state >/dev/null 2>&1; then
@@ -240,8 +274,12 @@ elif [[ "${SECRET_REUSED}" -eq 1 ]]; then
   echo "[INFO] Flask secret key: reused from existing ${ENV_FILE}"
 fi
 echo "[INFO] Runtime env file: ${ENV_FILE}"
+echo "[INFO] Check timer schedule: ${CHECK_ON_CALENDAR}"
 echo
 echo "Logs:"
 echo "  journalctl -u ${SERVICE_NAME} -f"
+echo "  journalctl -u ${CHECK_SERVICE_NAME}.service -f"
+echo "Timer:"
+echo "  systemctl status ${CHECK_SERVICE_NAME}.timer --no-pager"
 echo "Visit:"
 echo "  http://<your-server-ip>:${PORT}"

@@ -1,0 +1,11 @@
+[Unit]
+Description=SSL Monitoring Periodic Check
+After=network.target
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/root/ssl-pulse
+ExecStart=/root/ssl-pulse/.venv/bin/python /root/ssl-pulse/check_ssl.py --check-only
+EnvironmentFile=-/root/ssl-pulse/.ssl_pulse.env
+Environment=PYTHONUNBUFFERED=1

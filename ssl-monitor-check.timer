@@ -1,0 +1,11 @@
+[Unit]
+Description=Run SSL Monitoring Check on Schedule
+
+[Timer]
+OnCalendar=hourly
+Persistent=true
+RandomizedDelaySec=300
+Unit=ssl-monitor-check.service
+
+[Install]
+WantedBy=timers.target
