@@ -5,6 +5,7 @@ __pycache__/
 
 .ssl_pulse.env
 alert_state.json
+runtime_status.json
 domains.json
 
 .DS_Store

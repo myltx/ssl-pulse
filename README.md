@@ -18,6 +18,7 @@
   - 里程碑提醒（默认 `30,15,7,3,1`）
   - 临期区间内每日最多 1 封
 - 仪表盘只负责展示，后台 timer 负责定时检测和发邮件
+- 页面可直接查看后台定时检测状态和最近一次邮件发送状态
 - 登录会话有效期可配置
 
 ## 项目结构
@@ -83,6 +84,7 @@ sudo bash update_python_alinux3.sh
 - `CHECK_ON_CALENDAR`：systemd timer 调度表达式（供部署脚本生成 timer，默认 `hourly`）
 - `SMTP_SERVER/SMTP_PORT/SMTP_USER/SMTP_PASSWORD/TO_EMAIL`：邮件配置
 - `DOMAINS`：可选，逗号分隔（通常建议通过页面管理）
+- `runtime_status.json`：运行时状态文件，记录后台定时检测和最近邮件发送结果
 
 修改配置后重启服务：
 

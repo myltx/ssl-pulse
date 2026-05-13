@@ -50,6 +50,7 @@ SMTP_PORT = get_env_int("SMTP_PORT", 587)
 SMTP_USER = os.getenv("SMTP_USER", "")
 SMTP_PASSWORD = os.getenv("SMTP_PASSWORD", "")
 TO_EMAIL = os.getenv("TO_EMAIL", "")
+CHECK_ON_CALENDAR = (os.getenv("CHECK_ON_CALENDAR", "hourly") or "hourly").strip()
 
 # 页面访问认证配置
 DASHBOARD_PASSWORD = os.getenv("DASHBOARD_PASSWORD", "admin123456")
@@ -63,8 +64,10 @@ app.permanent_session_lifetime = timedelta(minutes=SESSION_TTL_MINUTES)
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DOMAINS_FILE = os.path.join(BASE_DIR, "domains.json")
 ALERT_STATE_FILE = os.path.join(BASE_DIR, "alert_state.json")
+RUNTIME_STATE_FILE = os.path.join(BASE_DIR, "runtime_status.json")
 DOMAINS_LOCK = threading.Lock()
 ALERT_STATE_LOCK = threading.Lock()
+RUNTIME_STATE_LOCK = threading.Lock()
 
 
 def normalize_domain(raw_value):
@@ -295,6 +298,204 @@ def remove_alert_state(domain):
             save_alert_state(state)
 
 
+def load_runtime_state():
+    if not os.path.exists(RUNTIME_STATE_FILE):
+        return {}
+    try:
+        with open(RUNTIME_STATE_FILE, "r", encoding="utf-8") as fp:
+            raw_state = json.load(fp)
+        return raw_state if isinstance(raw_state, dict) else {}
+    except Exception:
+        return {}
+
+
+def save_runtime_state(state):
+    with open(RUNTIME_STATE_FILE, "w", encoding="utf-8") as fp:
+        json.dump(state, fp, ensure_ascii=False, indent=2)
+
+
+def update_runtime_state(mutator):
+    with RUNTIME_STATE_LOCK:
+        state = load_runtime_state()
+        mutator(state)
+        save_runtime_state(state)
+
+
+def record_email_status(status, domain, days_left, reason, error=None):
+    now_text = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    def apply_update(state):
+        email_state = state.get("email", {})
+        email_state["last_attempt_status"] = status
+        email_state["last_attempt_at"] = now_text
+        email_state["last_attempt_domain"] = domain
+        email_state["last_attempt_reason"] = reason
+        email_state["last_attempt_days_left"] = days_left
+        email_state["last_attempt_error"] = error
+        email_state["smtp_server"] = SMTP_SERVER
+        email_state["to_email"] = TO_EMAIL
+
+        if status == "success":
+            email_state["last_success_at"] = now_text
+            email_state["last_success_domain"] = domain
+            email_state["last_success_reason"] = reason
+            email_state["last_success_days_left"] = days_left
+        elif error:
+            email_state["last_failure_at"] = now_text
+            email_state["last_failure_domain"] = domain
+            email_state["last_failure_reason"] = reason
+            email_state["last_failure_days_left"] = days_left
+            email_state["last_failure_error"] = error
+
+        state["email"] = email_state
+
+    update_runtime_state(apply_update)
+
+
+def infer_schedule_seconds(schedule_text):
+    mapping = {
+        "minutely": 60,
+        "hourly": 3600,
+        "daily": 86400,
+        "weekly": 7 * 86400,
+    }
+    return mapping.get((schedule_text or "").strip().lower())
+
+
+def build_timer_panel(runtime_state):
+    check_state = runtime_state.get("scheduled_check", {})
+    schedule_text = CHECK_ON_CALENDAR or "hourly"
+    expected_seconds = infer_schedule_seconds(schedule_text)
+    last_completed_at = check_state.get("last_completed_at")
+    last_started_at = check_state.get("last_started_at")
+    last_status = check_state.get("last_status")
+    last_error = check_state.get("last_error")
+    summary_text = check_state.get("summary_text") or "暂无记录"
+
+    health_text = "等待首次执行"
+    health_level = "warn"
+
+    if last_completed_at:
+        health_text = "最近执行正常"
+        health_level = "ok"
+        if expected_seconds:
+            try:
+                completed_at = datetime.strptime(last_completed_at, "%Y-%m-%d %H:%M:%S")
+                age_seconds = (datetime.now() - completed_at).total_seconds()
+                if age_seconds > max(expected_seconds * 2, 900):
+                    health_text = "可能未按计划执行"
+                    health_level = "danger"
+            except Exception:
+                pass
+
+    if last_status == "failed":
+        health_text = "最近执行失败"
+        health_level = "danger"
+    elif last_status == "partial":
+        health_text = "最近执行有异常"
+        health_level = "warn"
+
+    return {
+        "title": "后台定时检测",
+        "enabled": True,
+        "health_text": health_text,
+        "health_level": health_level,
+        "schedule_text": schedule_text,
+        "last_started_at": last_started_at or "暂无记录",
+        "last_completed_at": last_completed_at or "暂无记录",
+        "last_status_text": {
+            "success": "执行成功",
+            "partial": "执行完成，但存在异常项",
+            "failed": "执行失败",
+        }.get(last_status, "等待首次执行"),
+        "summary_text": summary_text,
+        "last_error": last_error,
+    }
+
+
+def build_email_panel(runtime_state):
+    email_ready = all([SMTP_SERVER, SMTP_USER, SMTP_PASSWORD, TO_EMAIL])
+    email_state = runtime_state.get("email", {})
+    last_attempt_status = email_state.get("last_attempt_status")
+
+    if not email_ready:
+        health_text = "未启用"
+        health_level = "warn"
+    elif last_attempt_status == "failed":
+        health_text = "最近发送失败"
+        health_level = "danger"
+    elif last_attempt_status == "success":
+        health_text = "最近发送成功"
+        health_level = "ok"
+    else:
+        health_text = "已启用，等待触发"
+        health_level = "warn"
+
+    return {
+        "title": "邮件提醒状态",
+        "enabled": email_ready,
+        "health_text": health_text,
+        "health_level": health_level,
+        "recipient_text": TO_EMAIL or "未配置",
+        "server_text": f"{SMTP_SERVER}:{SMTP_PORT}" if SMTP_SERVER else "未配置",
+        "last_attempt_at": email_state.get("last_attempt_at") or "暂无记录",
+        "last_attempt_text": {
+            "success": "发送成功",
+            "failed": "发送失败",
+        }.get(last_attempt_status, "暂无触发记录"),
+        "last_attempt_domain": email_state.get("last_attempt_domain") or "-",
+        "last_attempt_reason": email_state.get("last_attempt_reason") or "-",
+        "last_attempt_error": email_state.get("last_attempt_error"),
+    }
+
+
+def record_scheduled_check_started(domain_count):
+    now_text = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    def apply_update(state):
+        state["scheduled_check"] = {
+            "last_started_at": now_text,
+            "last_completed_at": state.get("scheduled_check", {}).get("last_completed_at"),
+            "last_status": "running",
+            "domain_count": domain_count,
+            "summary_text": f"开始检测，共 {domain_count} 个域名",
+            "last_error": None,
+        }
+
+    update_runtime_state(apply_update)
+
+
+def record_scheduled_check_finished(stats, results, error=None):
+    now_text = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    failed_count = sum(1 for item in results if item.get("status") == "连接失败")
+    if error:
+        status = "failed"
+        summary_text = f"执行失败：{error}"
+    elif failed_count > 0:
+        status = "partial"
+        summary_text = (
+            f"执行完成：正常 {stats['normal']}，即将过期 {stats['warning']}，"
+            f"已过期 {stats['expired']}，连接失败 {failed_count}"
+        )
+    else:
+        status = "success"
+        summary_text = (
+            f"执行完成：正常 {stats['normal']}，即将过期 {stats['warning']}，"
+            f"已过期 {stats['expired']}"
+        )
+
+    def apply_update(state):
+        check_state = state.get("scheduled_check", {})
+        check_state["last_completed_at"] = now_text
+        check_state["last_status"] = status
+        check_state["summary_text"] = summary_text
+        check_state["last_error"] = error
+        check_state["stats"] = stats
+        state["scheduled_check"] = check_state
+
+    update_runtime_state(apply_update)
+
+
 def parse_milestones():
     milestones = []
     for value in ALERT_MILESTONES:
@@ -330,9 +531,11 @@ def send_alert(domain, expiry_date, days_left, reason):
         server.sendmail(SMTP_USER, [TO_EMAIL], msg.as_string())
         server.quit()
         print(f"[邮件] 已发送预警: {domain} | {reason} | 剩余{days_left}天")
+        record_email_status("success", domain, days_left, reason)
         return True
     except Exception as exc:
         print(f"[邮件错误]: {exc}")
+        record_email_status("failed", domain, days_left, reason, error=str(exc))
         return False
 
 
@@ -464,25 +667,36 @@ def run_check_cycle(send_alerts):
 def run_check_once():
     started_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print(f"[检查] 开始执行 SSL 检测: {started_at}")
-    results, stats = run_check_cycle(send_alerts=True)
+    domain_count = len(get_domains())
+    record_scheduled_check_started(domain_count)
 
-    if not results:
-        print("[检查] 当前没有配置任何域名，跳过检测。")
-        return 0
+    try:
+        results, stats = run_check_cycle(send_alerts=True)
 
-    for item in results:
-        error_suffix = f" | 错误: {item['error']}" if item.get("error") else ""
+        if not results:
+            print("[检查] 当前没有配置任何域名，跳过检测。")
+            record_scheduled_check_finished(build_stats([]), [], error=None)
+            return 0
+
+        for item in results:
+            error_suffix = f" | 错误: {item['error']}" if item.get("error") else ""
+            print(
+                f"[检查] {item['domain']} | 状态: {item['status']} | 过期时间: {item['expiry']} | "
+                f"剩余天数: {item['days_left']}{error_suffix}"
+            )
+
         print(
-            f"[检查] {item['domain']} | 状态: {item['status']} | 过期时间: {item['expiry']} | "
-            f"剩余天数: {item['days_left']}{error_suffix}"
+            "[检查] 完成: "
+            f"总数={stats['total']} 正常={stats['normal']} 即将过期={stats['warning']} "
+            f"已过期={stats['expired']} 连接失败={stats['failed']}"
         )
-
-    print(
-        "[检查] 完成: "
-        f"总数={stats['total']} 正常={stats['normal']} 即将过期={stats['warning']} "
-        f"已过期={stats['expired']} 连接失败={stats['failed']}"
-    )
-    return 0
+        record_scheduled_check_finished(stats, results, error=None)
+        return 0
+    except Exception as exc:
+        error_text = str(exc)
+        print(f"[检查错误] {error_text}")
+        record_scheduled_check_finished(build_stats([]), [], error=error_text)
+        return 1
 
 
 def parse_args():
@@ -539,6 +753,9 @@ def delete_domain():
 def index():
     results, stats = run_check_cycle(send_alerts=False)
     milestones = parse_milestones()
+    runtime_state = load_runtime_state()
+    timer_panel = build_timer_panel(runtime_state)
+    email_panel = build_email_panel(runtime_state)
 
     html_template = """
     <!DOCTYPE html>
@@ -631,6 +848,64 @@ def index():
             display: grid;
             grid-template-columns: repeat(5, minmax(110px, 1fr));
             gap: 8px;
+        }
+        .status-panels {
+            margin-top: 12px;
+            display: grid;
+            grid-template-columns: repeat(2, minmax(280px, 1fr));
+            gap: 10px;
+        }
+        .status-panel {
+            background: linear-gradient(180deg, rgba(255, 255, 255, 0.96), rgba(244, 248, 255, 0.92));
+            border: 1px solid #d9e6fb;
+            border-radius: 14px;
+            padding: 12px;
+            position: relative;
+            overflow: hidden;
+        }
+        .status-panel::before {
+            content: "";
+            position: absolute;
+            left: 0;
+            top: 0;
+            bottom: 0;
+            width: 4px;
+            background: linear-gradient(180deg, #60a5fa, #2dd4bf);
+        }
+        .status-panel.danger::before {
+            background: linear-gradient(180deg, #f97316, #dc2626);
+        }
+        .status-panel.warn::before {
+            background: linear-gradient(180deg, #f59e0b, #f97316);
+        }
+        .status-panel.ok::before {
+            background: linear-gradient(180deg, #10b981, #14b8a6);
+        }
+        .status-head {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 8px;
+            margin-bottom: 10px;
+        }
+        .status-title {
+            margin: 0;
+            font-size: 16px;
+            font-weight: 700;
+        }
+        .status-summary {
+            font-size: 12px;
+            font-weight: 700;
+            border-radius: 999px;
+            padding: 4px 9px;
+        }
+        .status-grid {
+            display: grid;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            gap: 8px;
+        }
+        .status-grid .kv {
+            min-height: 64px;
         }
         .stat {
             border-radius: 12px;
@@ -824,6 +1099,7 @@ def index():
             to { opacity: 1; transform: translateY(0); }
         }
         @media (max-width: 900px) {
+            .status-panels { grid-template-columns: 1fr; }
             .stats { grid-template-columns: repeat(2, minmax(120px, 1fr)); }
             .title { font-size: 22px; }
             .cards { grid-template-columns: repeat(auto-fill, minmax(210px, 1fr)); }
@@ -864,6 +1140,7 @@ def index():
                     已关闭每日提醒。
                     {% endif %}
                 </p>
+                <p class="tiny">后台检测调度：{{ timer_panel.schedule_text }}。页面刷新只展示结果，不触发邮件发送。</p>
                 <p class="tiny">排序规则：按剩余天数从小到大，连接失败项排在最后。</p>
 
                 {% with messages = get_flashed_messages() %}
@@ -873,6 +1150,84 @@ def index():
                         {% endfor %}
                     {% endif %}
                 {% endwith %}
+
+                <div class="status-panels">
+                    <section class="status-panel {{ timer_panel.health_level }}">
+                        <div class="status-head">
+                            <h2 class="status-title">{{ timer_panel.title }}</h2>
+                            <span class="status-summary {% if timer_panel.health_level == 'ok' %}ok{% elif timer_panel.health_level == 'warn' %}warn{% else %}danger{% endif %}">
+                                {{ timer_panel.health_text }}
+                            </span>
+                        </div>
+                        <div class="status-grid">
+                            <div class="kv">
+                                <span class="kv-label">调度周期</span>
+                                <span class="kv-value">{{ timer_panel.schedule_text }}</span>
+                            </div>
+                            <div class="kv">
+                                <span class="kv-label">最近执行结果</span>
+                                <span class="kv-value">{{ timer_panel.last_status_text }}</span>
+                            </div>
+                            <div class="kv">
+                                <span class="kv-label">最近开始时间</span>
+                                <span class="kv-value">{{ timer_panel.last_started_at }}</span>
+                            </div>
+                            <div class="kv">
+                                <span class="kv-label">最近完成时间</span>
+                                <span class="kv-value">{{ timer_panel.last_completed_at }}</span>
+                            </div>
+                            <div class="kv">
+                                <span class="kv-label">执行摘要</span>
+                                <span class="kv-value">{{ timer_panel.summary_text }}</span>
+                            </div>
+                            <div class="kv">
+                                <span class="kv-label">异常信息</span>
+                                <span class="kv-value">{{ timer_panel.last_error or '-' }}</span>
+                            </div>
+                        </div>
+                    </section>
+
+                    <section class="status-panel {{ email_panel.health_level }}">
+                        <div class="status-head">
+                            <h2 class="status-title">{{ email_panel.title }}</h2>
+                            <span class="status-summary {% if email_panel.health_level == 'ok' %}ok{% elif email_panel.health_level == 'warn' %}warn{% else %}danger{% endif %}">
+                                {{ email_panel.health_text }}
+                            </span>
+                        </div>
+                        <div class="status-grid">
+                            <div class="kv">
+                                <span class="kv-label">收件人</span>
+                                <span class="kv-value">{{ email_panel.recipient_text }}</span>
+                            </div>
+                            <div class="kv">
+                                <span class="kv-label">SMTP 服务</span>
+                                <span class="kv-value">{{ email_panel.server_text }}</span>
+                            </div>
+                            <div class="kv">
+                                <span class="kv-label">最近发送时间</span>
+                                <span class="kv-value">{{ email_panel.last_attempt_at }}</span>
+                            </div>
+                            <div class="kv">
+                                <span class="kv-label">最近发送结果</span>
+                                <span class="kv-value">{{ email_panel.last_attempt_text }}</span>
+                            </div>
+                            <div class="kv">
+                                <span class="kv-label">最近触发域名</span>
+                                <span class="kv-value">{{ email_panel.last_attempt_domain }}</span>
+                            </div>
+                            <div class="kv">
+                                <span class="kv-label">最近触发原因</span>
+                                <span class="kv-value">{{ email_panel.last_attempt_reason }}</span>
+                            </div>
+                        </div>
+                        {% if email_panel.last_attempt_error %}
+                        <details class="error-detail">
+                            <summary>查看最近邮件错误</summary>
+                            <pre class="error-text">{{ email_panel.last_attempt_error }}</pre>
+                        </details>
+                        {% endif %}
+                    </section>
+                </div>
 
                 <div class="stats">
                     <div class="stat">总域名<b>{{ stats.total }}</b></div>
@@ -938,6 +1293,8 @@ def index():
         milestones_text="/".join(str(day) for day in milestones) if milestones else "-",
         enable_daily_reminder=ENABLE_DAILY_REMINDER,
         alert_days=ALERT_DAYS,
+        timer_panel=timer_panel,
+        email_panel=email_panel,
     )
 
 
